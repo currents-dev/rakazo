@@ -133,7 +133,9 @@ describe("server image publish workflow", () => {
     expect(workflow.on).toHaveProperty("workflow_call");
     const publish = ci.jobs["publish-server-image"];
     expect(publish?.uses).toBe("./.github/workflows/publish-server-image.yml");
-    expect(publish?.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/main'");
+    expect(publish?.if).toBe(
+      "github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'elie222/rakazo'",
+    );
     expect(ci.jobs["deploy-production"]?.needs).toEqual([
       "checks",
       "test-integration",
