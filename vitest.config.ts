@@ -75,18 +75,21 @@ export default defineConfig({
   },
   test: {
     // CI writes JUnit for Currents; a trusted workflow uploads it, so fork pull requests are recorded too.
-    reporters: process.env.VITEST_JUNIT_FILE
-      ? [
-          "default",
-          [
-            "junit",
-            {
-              outputFile: process.env.VITEST_JUNIT_FILE,
-              suiteName: process.env.VITEST_JUNIT_SUITE ?? "vitest",
-            },
+    // The key is left out otherwise: `reporters: undefined` silences nested runs such as compose-stack.test.ts.
+    ...(process.env.VITEST_JUNIT_FILE
+      ? {
+          reporters: [
+            "default",
+            [
+              "junit",
+              {
+                outputFile: process.env.VITEST_JUNIT_FILE,
+                suiteName: process.env.VITEST_JUNIT_SUITE ?? "vitest",
+              },
+            ],
           ],
-        ]
-      : undefined,
+        }
+      : {}),
     // Load the markdown renderer's shipped TypeScript source through vite so
     // react-native can be mocked in node tests.
     server: { deps: { inline: [/react-native-markdown-display/] } },
