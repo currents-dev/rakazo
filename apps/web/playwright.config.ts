@@ -1,3 +1,4 @@
+import { currentsReporter } from "@currents/playwright";
 import { defineConfig, devices } from "@playwright/test";
 import { isRealSandboxProvider } from "./e2e/helpers";
 
@@ -73,6 +74,8 @@ const reporters = [
   process.env.GITHUB_ACTIONS
     ? (["blob", { outputDir: "../../blob-report" }] as const)
     : (["html", { open: "never", outputFolder: "../../playwright-report" }] as const),
+  // Records to Currents only where the record key is available: fork pull requests get no secrets.
+  ...(process.env.CURRENTS_RECORD_KEY ? [currentsReporter()] : []),
 ];
 
 const ignoredSpecs = [...(skipNightly ? nightlySpecs : []), ...(skipHeavy ? heavySpecs : [])].map(

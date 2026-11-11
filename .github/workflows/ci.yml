@@ -191,11 +191,16 @@ jobs:
           sudo install -m 755 "$RUNNER_TEMP/age/age" "$RUNNER_TEMP/age/age-keygen" /usr/local/bin/
       - name: Unit tests
         if: steps.areas.outputs.all_packages != 'false'
+        env:
+          VITEST_JUNIT_FILE: ${{ github.workspace }}/currents-junit/unit-${{ matrix.shard }}.xml
+          VITEST_JUNIT_SUITE: Unit tests
         run: pnpm run test --shard=${{ matrix.shard }}/6
       - name: Unit tests for affected packages
         if: steps.areas.outputs.all_packages == 'false'
         env:
           TURBO_SCM_BASE: HEAD^1
+          VITEST_JUNIT_FILE: ${{ github.workspace }}/currents-junit/unit-${{ matrix.shard }}.xml
+          VITEST_JUNIT_SUITE: Unit tests
         run: |
           affected="$(pnpm exec turbo ls --affected --output=json | jq -r '.packages.items[].path + "/"')"
           mapfile -t packages < <(printf "%s" "$affected")
@@ -216,6 +221,15 @@ jobs:
           else
             pnpm exec vitest run "${targets[@]}" --shard=${{ matrix.shard }}/6
           fi
+      # currents-upload.yml uploads these after the run, with the record key fork jobs don't get.
+      - name: Upload JUnit for Currents
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: currents-junit-unit-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: currents-junit
+          if-no-files-found: ignore
+          retention-days: 3
 
   # The required check and the deploy gate, under one stable name.
   checks:
@@ -233,7 +247,7 @@ jobs:
   native-computer:
     name: Native computer (${{ matrix.os }})
     needs: changes
-    if: needs.changes.outputs.native == 'true'
+    if: needs.changes.outputs.native == 'true' && github.repository == 'elie222/rakazo'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -331,6 +345,17 @@ jobs:
           exit 1
       - run: pnpm test:integration --shard=${{ matrix.shard }}/6
         if: steps.areas.outputs.server != 'false'
+        env:
+          VITEST_JUNIT_FILE: ${{ github.workspace }}/currents-junit/postgres-${{ matrix.shard }}.xml
+          VITEST_JUNIT_SUITE: Postgres journeys
+      - name: Upload JUnit for Currents
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: currents-junit-postgres-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: currents-junit
+          if-no-files-found: ignore
+          retention-days: 3
 
   # The required check and the deploy gate, under one stable name.
   test-integration:
@@ -361,12 +386,14 @@ jobs:
     with:
       upload_artifacts: true
       changed_areas: true
+    secrets:
+      CURRENTS_RECORD_KEY: ${{ secrets.CURRENTS_RECORD_KEY }}
 
   # Publishes sha-<commit> and edge alongside the checks, so the production deploy pulls the
   # image this run built instead of building on the production host.
   publish-server-image:
     name: Publish server images
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'elie222/rakazo'
     concurrency:
       group: ci-images-main
     uses: ./.github/workflows/publish-server-image.yml
@@ -378,7 +405,7 @@ jobs:
 
   publish-mobile-update:
     name: Publish compatible mobile update
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'elie222/rakazo'
     needs: [checks, test-integration]
     runs-on: ubuntu-latest
     timeout-minutes: 20

@@ -31,6 +31,9 @@ on:
       S3_SECRET_ACCESS_KEY:
         description: Secret key used to publish visual reports
         required: false
+      CURRENTS_RECORD_KEY:
+        description: Records results to Currents; absent on fork pull requests
+        required: false
 
 permissions:
   contents: read
@@ -173,6 +176,9 @@ jobs:
           SHARD: ${{ matrix.shard }}/6
           E2E_SKIP_NIGHTLY: ${{ !inputs.nightly && '1' || '' }}
           E2E_SKIP_HEAVY: "1"
+          CURRENTS_PROJECT_ID: ${{ vars.CURRENTS_PROJECT_ID }}
+          CURRENTS_RECORD_KEY: ${{ secrets.CURRENTS_RECORD_KEY }}
+          CURRENTS_CI_BUILD_ID: ${{ github.repository }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: pnpm test:e2e -- --shard="$SHARD"
       - name: Upload shard results
         if: always() && steps.areas.outputs.e2e != 'false'
@@ -267,6 +273,9 @@ jobs:
         env:
           E2E_SKIP_NIGHTLY: ${{ !inputs.nightly && '1' || '' }}
           E2E_WORKERS: ${{ matrix.workers }}
+          CURRENTS_PROJECT_ID: ${{ vars.CURRENTS_PROJECT_ID }}
+          CURRENTS_RECORD_KEY: ${{ secrets.CURRENTS_RECORD_KEY }}
+          CURRENTS_CI_BUILD_ID: ${{ github.repository }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: pnpm test:e2e -- --spec="${{ matrix.spec }}.spec.ts"
       - name: Upload heavy results
         if: always() && steps.areas.outputs.e2e != 'false'
