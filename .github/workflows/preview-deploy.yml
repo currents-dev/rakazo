@@ -252,7 +252,7 @@ jobs:
           COMMIT_INFO_MESSAGE: ${{ github.event.workflow_run.head_commit.message }}
           COMMIT_INFO_AUTHOR: ${{ github.event.workflow_run.head_commit.author.name }}
           COMMIT_INFO_EMAIL: ${{ github.event.workflow_run.head_commit.author.email }}
-          COMMIT_INFO_REMOTE: ${{ github.event.workflow_run.head_repository.clone_url }}
+          COMMIT_INFO_REMOTE: ${{ github.event.workflow_run.head_repository.html_url }}
         run: |
           set -euo pipefail
           [[ $PR =~ ^[0-9]+$ ]] || { echo "Bad pull request number" >&2; exit 1; }
@@ -289,6 +289,18 @@ jobs:
           echo "$share"
           url=$(grep -oE 'https://[^[:space:])>]+' <<< "$share" | head -1)
           [[ $url =~ ^https:// ]] && echo "share_url=$url" >> "$GITHUB_OUTPUT"
+          # The CLI prints no link per file, so take them from the Attachments section of the
+          # share page's Markdown. Writes "kind<TAB>name<TAB>url" lines for the next step.
+          md=$(sed -n 's/^Markdown: \(https:\/\/[^[:space:]]*\)$/\1/p' <<< "$share" | head -1)
+          if [[ $md =~ ^https://s\.crts\.sh/ ]]; then
+            curl -fsSL --max-time 30 "$md" \
+              | awk '/^## / {inside = ($0 == "## Attachments")} inside' \
+              | sed -nE \
+                -e 's#^- (screenshot|video) \[([^]]+)\]\((https://s\.crts\.sh/at/[A-Za-z0-9_-]+)\)$#\1\t\2\t\3#p' \
+                -e 's#^- trace \[[^]]+\]\(https://t\.crts\.sh/([A-Za-z0-9_-]+)\).*$#animation\t-\thttps://t.crts.sh/\1/animation#p' \
+              > "$RUNNER_TEMP/currents-media.tsv" || true
+            cat "$RUNNER_TEMP/currents-media.tsv"
+          fi
       - name: Update the description
         env:
           GH_TOKEN: ${{ github.token }}
@@ -323,13 +335,33 @@ jobs:
           key="pr-agent/$PR/$HEAD_SHA"
           python3 .github/scripts/pr-screenshots.py prepare "$RESULT" "$shots" \
             "${PLAYWRIGHT_PUBLIC_BASE_URL%/}/$key" "$out"
+          media="$RUNNER_TEMP/currents-media.tsv"
+          extra="$out/extra.md"
+          : > "$extra"
           if [[ -z ${S3_BUCKET:-} && -s $out/section.md ]]; then
-            grep -v '^!\[' "$out/section.md" > "$out/section.tmp" && mv "$out/section.tmp" "$out/section.md"
+            # Show the Currents session's copies instead. GitHub drops <video> tags with
+            # outside sources, so the video is a link and the trace screencast shows inline.
+            if [[ -s $media ]]; then
+              while IFS=$'\t' read -r kind name link; do
+                case $kind in
+                  screenshot)
+                    if [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.png$ ]]; then
+                      sed -i "s|](${PLAYWRIGHT_PUBLIC_BASE_URL}/${key}/${name})|](${link})|" "$out/section.md"
+                    fi ;;
+                  animation) printf 'Screencast of the browser session:\n\n![Screencast of the browser session](%s)\n\n' "$link" >> "$extra" ;;
+                  video) printf 'Video of the browser session (WebM): %s\n\n' "$link" >> "$extra" ;;
+                esac
+              done < "$media"
+            fi
+            grep -v '^!\[.*](https://invalid\.example/' "$out/section.md" > "$out/section.tmp" && mv "$out/section.tmp" "$out/section.md"
             : > "$out/uploads.txt"
           fi
           if [[ -s $out/section.md && $CURRENTS_SHARE_URL =~ ^https://[^[:space:]]+$ ]]; then
-            awk -v link="Recording of the agent's browser session, with every screenshot: $CURRENTS_SHARE_URL" \
-              '/<!-- rakazo-pr-screenshots:end -->/ {print link; print ""} {print}' "$out/section.md" > "$out/section.tmp"
+            printf "Recording of the agent's browser session, with every screenshot: %s\n\n" "$CURRENTS_SHARE_URL" >> "$extra"
+          fi
+          if [[ -s $out/section.md && -s $extra ]]; then
+            awk -v extra="$extra" '/<!-- rakazo-pr-screenshots:end -->/ {while ((getline line < extra) > 0) print line} {print}' \
+              "$out/section.md" > "$out/section.tmp"
             mv "$out/section.tmp" "$out/section.md"
           fi
           while IFS= read -r name; do
