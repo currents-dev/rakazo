@@ -370,7 +370,7 @@ export function PluginsOverlay({
                 onClick={onOpenTemplates}
               >
                 <LayoutTemplate />
-                <Trans>Templates</Trans>
+                <Trans>Bot templates</Trans>
               </Button>
             ) : null}
             {browsing || view === "manage" ? (
