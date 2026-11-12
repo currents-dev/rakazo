@@ -33,7 +33,7 @@ jobs:
       - name: Upload to Currents
         working-directory: ${{ runner.temp }}
         env:
-          CURRENTS_PROJECT_ID: ${{ vars.CURRENTS_PROJECT_ID }}
+          CURRENTS_PROJECT_ID: ${{ vars.CURRENTS_VITEST_PROJECT_ID }}
           CURRENTS_RECORD_KEY: ${{ secrets.CURRENTS_RECORD_KEY }}
           CURRENTS_CI_BUILD_ID: ${{ github.repository }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-vitest
           # The upload runs on the default branch, so the commit it describes comes from the CI run.
