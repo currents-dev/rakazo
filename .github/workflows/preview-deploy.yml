@@ -149,6 +149,9 @@ jobs:
           sudo env PLAYWRIGHT_BROWSERS_PATH=/opt/pr-screenshots-browsers \
             "$node" /opt/pr-screenshots-mcp/node_modules/playwright/cli.js install chromium
           sudo install -d -o pr-screenshots -g pr-screenshots -m 755 /srv/pr-screenshots
+          # Currents trial: record video and the MCP session log without the agent's help.
+          echo '{"saveSession":true,"browser":{"contextOptions":{"recordVideo":{"dir":"/srv/pr-screenshots/video","size":{"width":1440,"height":900}}}}}' \
+            | sudo tee /opt/pr-screenshots-mcp/config.json > /dev/null
           jq -n --arg node "$node" --arg origin "$PREVIEW_URL" '{mcpServers: {playwright: {
             command: "sudo",
             args: ["-n", "-u", "pr-screenshots", "env", "-i", "-C", "/srv/pr-screenshots",
@@ -156,7 +159,8 @@ jobs:
               "PLAYWRIGHT_BROWSERS_PATH=/opt/pr-screenshots-browsers",
               $node, "/opt/pr-screenshots-mcp/node_modules/@playwright/mcp/cli.js",
               "--headless", "--isolated", "--browser", "chromium", "--viewport-size", "1440x900",
-              "--output-dir", "/srv/pr-screenshots", "--allowed-origins", $origin]}}}' \
+              "--output-dir", "/srv/pr-screenshots", "--allowed-origins", $origin,
+              "--config", "/opt/pr-screenshots-mcp/config.json", "--caps", "devtools"]}}}' \
             > "$RUNNER_TEMP/pr-screenshots-mcp.json"
       - id: claude
         if: steps.pr.outputs.pr
@@ -171,7 +175,7 @@ jobs:
             --model claude-sonnet-5-5
             --max-turns 60
             --mcp-config ${{ runner.temp }}/pr-screenshots-mcp.json
-            --allowedTools mcp__playwright__browser_navigate,mcp__playwright__browser_navigate_back,mcp__playwright__browser_snapshot,mcp__playwright__browser_click,mcp__playwright__browser_type,mcp__playwright__browser_fill_form,mcp__playwright__browser_press_key,mcp__playwright__browser_select_option,mcp__playwright__browser_hover,mcp__playwright__browser_wait_for,mcp__playwright__browser_resize,mcp__playwright__browser_handle_dialog,mcp__playwright__browser_take_screenshot
+            --allowedTools mcp__playwright__browser_navigate,mcp__playwright__browser_navigate_back,mcp__playwright__browser_snapshot,mcp__playwright__browser_click,mcp__playwright__browser_type,mcp__playwright__browser_fill_form,mcp__playwright__browser_press_key,mcp__playwright__browser_select_option,mcp__playwright__browser_hover,mcp__playwright__browser_wait_for,mcp__playwright__browser_resize,mcp__playwright__browser_handle_dialog,mcp__playwright__browser_take_screenshot,mcp__playwright__browser_start_tracing,mcp__playwright__browser_stop_tracing
             --disallowedTools Read,Grep,Glob,Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,mcp__playwright__browser_evaluate,mcp__playwright__browser_run_code_unsafe,mcp__playwright__browser_file_upload,mcp__playwright__browser_drop,mcp__playwright__browser_network_request,mcp__playwright__browser_network_requests
             --json-schema '{"type":"object","additionalProperties":false,"required":["screenshots"],"properties":{"screenshots":{"type":"array","maxItems":4,"items":{"type":"object","additionalProperties":false,"required":["file","caption"],"properties":{"file":{"type":"string"},"caption":{"type":"string"}}}}}}'
       - name: Collect screenshots
@@ -186,6 +190,24 @@ jobs:
         with:
           name: pr-screenshots
           path: ${{ runner.temp }}/shots
+          if-no-files-found: ignore
+          retention-days: 3
+      # Currents trial: the trace, video and MCP session log, for the trusted job to upload.
+      - name: Collect the recording
+        if: always() && steps.pr.outputs.pr
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/recording"
+          sudo find /srv/pr-screenshots -mindepth 1 -maxdepth 1 \( -name traces -o -name video -o -name 'session*' \) \
+            -exec cp -r -t "$RUNNER_TEMP/recording" {} + || true
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/recording"
+          du -sh "$RUNNER_TEMP/recording" || true
+          find "$RUNNER_TEMP/recording" -maxdepth 2 | head -50
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always() && steps.pr.outputs.pr
+        with:
+          name: pr-recording
+          path: ${{ runner.temp }}/recording
           if-no-files-found: ignore
           retention-days: 3
 
@@ -210,6 +232,63 @@ jobs:
         with:
           name: pr-screenshots
           path: ${{ runner.temp }}/shots
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
+        with:
+          name: pr-recording
+          path: ${{ runner.temp }}/recording
+      # Currents trial: the agent's screenshots, trace and video become one Currents session.
+      # Only zips and uploads the files; nothing the agent produced runs here.
+      - name: Record the preview session in Currents
+        id: currents
+        if: vars.CURRENTS_PROJECT_ID != ''
+        continue-on-error: true
+        env:
+          CURRENTS_RECORD_KEY: ${{ secrets.CURRENTS_RECORD_KEY }}
+          CURRENTS_PROJECT_ID: ${{ vars.CURRENTS_PROJECT_ID }}
+          PR: ${{ needs.screenshots.outputs.pr }}
+          COMMIT_INFO_SHA: ${{ github.event.workflow_run.head_sha }}
+          COMMIT_INFO_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          COMMIT_INFO_MESSAGE: ${{ github.event.workflow_run.head_commit.message }}
+          COMMIT_INFO_AUTHOR: ${{ github.event.workflow_run.head_commit.author.name }}
+          COMMIT_INFO_EMAIL: ${{ github.event.workflow_run.head_commit.author.email }}
+          COMMIT_INFO_REMOTE: ${{ github.event.workflow_run.head_repository.clone_url }}
+        run: |
+          set -euo pipefail
+          [[ $PR =~ ^[0-9]+$ ]] || { echo "Bad pull request number" >&2; exit 1; }
+          rec="$RUNNER_TEMP/recording"
+          shots="$RUNNER_TEMP/shots"
+          work="$RUNNER_TEMP/currents-session"
+          mkdir -p "$work/files"
+          total=$(du -sm "$rec" "$shots" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+          (( total < 300 )) || { echo "Recording is ${total} MB; skipping."; exit 0; }
+          files=()
+          if [[ -d $rec/traces ]] && compgen -G "$rec/traces/*.trace" > /dev/null; then
+            (
+              cd "$rec/traces"
+              cat ./*.trace > "$work/trace.trace"
+              if compgen -G "./*.network" > /dev/null; then cat ./*.network > "$work/trace.network"; fi
+              cp "$work"/trace.* .
+              zip -qr "$work/files/preview-trace.zip" trace.trace $( [[ -f trace.network ]] && echo trace.network ) \
+                $( [[ -d screencast ]] && echo screencast ) $( [[ -d resources ]] && echo resources )
+            )
+            files+=("$work/files/preview-trace.zip")
+          fi
+          if [[ -d $rec/video ]]; then
+            while IFS= read -r f; do files+=("$f"); done < <(find "$rec/video" -name '*.webm' -size +0c)
+          fi
+          while IFS= read -r f; do files+=("$f"); done < <(find "$rec" -maxdepth 2 -name 'session*.md' -size +0c)
+          if [[ -d $shots ]]; then
+            while IFS= read -r f; do files+=("$f"); done < <(find "$shots" -maxdepth 1 -name '*.png')
+          fi
+          (( ${#files[@]} )) || { echo "No recording files; skipping."; exit 0; }
+          cd "$work"
+          npx --yes @currents/cmd@3.0.0 session start --title "PR #$PR preview: what the screenshot agent saw" --pr "$PR"
+          npx --yes @currents/cmd@3.0.0 session attach "${files[@]}"
+          share=$(npx --yes @currents/cmd@3.0.0 session share --expires-in-days 7)
+          echo "$share"
+          url=$(grep -oE 'https://[^[:space:])>]+' <<< "$share" | head -1)
+          [[ $url =~ ^https:// ]] && echo "share_url=$url" >> "$GITHUB_OUTPUT"
       - name: Update the description
         env:
           GH_TOKEN: ${{ github.token }}
@@ -223,11 +302,17 @@ jobs:
           S3_BUCKET: ${{ vars.S3_BUCKET }}
           S3_ENDPOINT: ${{ vars.S3_ENDPOINT }}
           PLAYWRIGHT_PUBLIC_BASE_URL: ${{ vars.PLAYWRIGHT_PUBLIC_BASE_URL }}
+          CURRENTS_SHARE_URL: ${{ steps.currents.outputs.share_url }}
         run: |
           set -euo pipefail
           [[ $PR =~ ^[0-9]+$ ]] || { echo "Bad pull request number" >&2; exit 1; }
           [[ $HEAD_SHA =~ ^[0-9a-f]{40}$ ]] || { echo "Bad commit" >&2; exit 1; }
-          [[ $PLAYWRIGHT_PUBLIC_BASE_URL =~ ^https://[^[:space:]]+$ ]] || { echo "PLAYWRIGHT_PUBLIC_BASE_URL must be an https URL" >&2; exit 1; }
+          if [[ -n ${S3_BUCKET:-} ]]; then
+            [[ $PLAYWRIGHT_PUBLIC_BASE_URL =~ ^https://[^[:space:]]+$ ]] || { echo "PLAYWRIGHT_PUBLIC_BASE_URL must be an https URL" >&2; exit 1; }
+          else
+            # Currents trial: no image bucket in this fork, so the images live in the Currents session.
+            PLAYWRIGHT_PUBLIC_BASE_URL="https://invalid.example"
+          fi
           if [[ $(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '"\(.state) \(.head.sha)"') != "open $HEAD_SHA" ]]; then
             echo "The pull request closed or has a newer commit; skipping."
             exit 0
@@ -238,6 +323,15 @@ jobs:
           key="pr-agent/$PR/$HEAD_SHA"
           python3 .github/scripts/pr-screenshots.py prepare "$RESULT" "$shots" \
             "${PLAYWRIGHT_PUBLIC_BASE_URL%/}/$key" "$out"
+          if [[ -z ${S3_BUCKET:-} && -s $out/section.md ]]; then
+            grep -v '^!\[' "$out/section.md" > "$out/section.tmp" && mv "$out/section.tmp" "$out/section.md"
+            : > "$out/uploads.txt"
+          fi
+          if [[ -s $out/section.md && $CURRENTS_SHARE_URL =~ ^https://[^[:space:]]+$ ]]; then
+            awk -v link="Recording of the agent's browser session, with every screenshot: $CURRENTS_SHARE_URL" \
+              '/<!-- rakazo-pr-screenshots:end -->/ {print link; print ""} {print}' "$out/section.md" > "$out/section.tmp"
+            mv "$out/section.tmp" "$out/section.md"
+          fi
           while IFS= read -r name; do
             aws s3 cp "$shots/$name" "s3://$S3_BUCKET/playwright/$key/$name" \
               --endpoint-url "$S3_ENDPOINT" --content-type image/png \
